@@ -59,7 +59,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, EBState> {
 }
 
 function isSetupComplete(): boolean {
-  return localStorage.getItem(LS.SETUP_COMPLETE) === 'true'
+  try {
+    return localStorage.getItem(LS.SETUP_COMPLETE) === 'true'
+  } catch {
+    return false
+  }
 }
 
 function NotFound() {

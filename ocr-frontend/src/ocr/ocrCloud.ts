@@ -106,66 +106,68 @@ async function callGemini(
   base64: string,
   mimeType: string,
   prompt: string,
-): Promise<string> {
-  // Try v1beta first (where most models live), fall back to v1
+): Promise<{ text: string; model: string }> {
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
   const versions = ['v1beta', 'v1'] as const
   let lastErr = ''
 
-  for (const version of versions) {
-    const url = `https://generativelanguage.googleapis.com/${version}/models/gemini-2.5-flash:generateContent?key=${apiKey}`
+  for (const model of models) {
+    for (const version of versions) {
+      const url = `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${apiKey}`
 
-    const body = {
-      contents: [{
-        parts: [
-          { text: prompt },
-          { inlineData: { mimeType, data: base64 } },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens: 8192,
-        responseMimeType: 'application/json',
-        thinkingConfig: { thinkingBudget: 0 },
-      },
+      const body = {
+        contents: [{
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: base64 } },
+          ],
+        }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 8192,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        if (import.meta.env.DEV) console.log('[Gemini raw response]', JSON.stringify(data, null, 2))
+
+        const candidate = data?.candidates?.[0]
+        const parts = candidate?.content?.parts
+        if (!parts || parts.length === 0) throw new Error('No parts in Gemini response')
+
+        // Gemini 2.5 returns "thought" parts (thinking) + regular "text" parts
+        // Filter out thought parts — they have a "thought" property set to true
+        const outputParts = parts.filter((p: Record<string, unknown>) =>
+          p.text != null && !p.thought
+        )
+
+        // If all parts are thought parts, fall back to any text part
+        const textParts = outputParts.length > 0
+          ? outputParts
+          : parts.filter((p: Record<string, unknown>) => p.text != null)
+
+        const text = textParts.length > 0 ? textParts[textParts.length - 1].text as string : null
+        if (!text) throw new Error('No text in Gemini response')
+        return { text: text.trim(), model }
+      }
+
+      const err = await res.json().catch(() => ({}))
+      lastErr = err?.error?.message ?? `HTTP ${res.status}`
+
+      // If it's a model-not-found error (404), try next model/version
+      if (res.status === 404) continue
+      // For other errors (quota, auth), don't bother trying v1
+      throw new Error(lastErr)
     }
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-
-    if (res.ok) {
-      const data = await res.json()
-      if (import.meta.env.DEV) console.log('[Gemini raw response]', JSON.stringify(data, null, 2))
-
-      const candidate = data?.candidates?.[0]
-      const parts = candidate?.content?.parts
-      if (!parts || parts.length === 0) throw new Error('No parts in Gemini response')
-
-      // Gemini 2.5 returns "thought" parts (thinking) + regular "text" parts
-      // Filter out thought parts — they have a "thought" property set to true
-      const outputParts = parts.filter((p: Record<string, unknown>) =>
-        p.text != null && !p.thought
-      )
-
-      // If all parts are thought parts, fall back to any text part
-      const textParts = outputParts.length > 0
-        ? outputParts
-        : parts.filter((p: Record<string, unknown>) => p.text != null)
-
-      const text = textParts.length > 0 ? textParts[textParts.length - 1].text as string : null
-      if (!text) throw new Error('No text in Gemini response')
-      return text.trim()
-    }
-
-    const err = await res.json().catch(() => ({}))
-    lastErr = err?.error?.message ?? `HTTP ${res.status}`
-
-    // If it's a model-not-found error, try next API version
-    if (res.status === 404) continue
-    // For other errors (quota, auth), don't bother trying v1
-    throw new Error(lastErr)
   }
 
   throw new Error(lastErr)
@@ -199,8 +201,8 @@ export async function callCloudOcr(
 
   for (let retry = 0; retry <= MAX_RETRIES; retry++) {
     try {
-      const text = await callGemini(apiKey, base64, mimeType, prompt)
-      return { text, model: 'gemini-2.5-flash' }
+      const { text, model } = await callGemini(apiKey, base64, mimeType, prompt)
+      return { text, model }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       errors.push(`[retry ${retry}] ${msg}`)

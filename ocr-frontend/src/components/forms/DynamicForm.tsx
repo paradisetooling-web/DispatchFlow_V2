@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { useForm, type SubmitHandler } from 'react-hook-form'
 import { Button } from '../ui/Button'
 import { Modal } from '../ui/Modal'
 import type { SchemaField, OcrResult, OcrLineItem } from '../../types'
@@ -20,28 +19,39 @@ interface Props {
 }
 
 export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, locked }: Props) {
-  const { register, handleSubmit, setValue, getValues, formState: { errors } } = useForm<Record<string, string>>({
-    defaultValues: initialValues ?? {},
-  })
-
+  const [values, setValues] = useState<Record<string, string>>(() => initialValues ?? {})
   const [ocrFilledKeys, setOcrFilledKeys] = useState<Set<string>>(new Set())
   const [warnModal, setWarnModal] = useState<{ open: boolean; missing: string[] }>({ open: false, missing: [] })
   const [lineItems, setLineItems] = useState<OcrLineItem[]>([])
   const [showItems, setShowItems] = useState(false)
 
+  // Sync initialValues when loaded asynchronously (e.g. from IndexedDB / Dexie)
+  useEffect(() => {
+    if (initialValues && Object.keys(initialValues).length > 0) {
+      setValues(prev => ({ ...initialValues, ...prev }))
+    }
+  }, [initialValues])
+
   // Apply OCR results to form
   useEffect(() => {
     if (!ocrResult || ocrResult.status === 'failed') return
     const filled = new Set<string>()
+    const updates: Record<string, string> = {}
+
     fields.forEach(f => {
       const val = ocrResult.data[f.key]
       if (val) {
-        setValue(f.key, val, { shouldDirty: true })
+        updates[f.key] = val
         filled.add(f.key)
       }
     })
-    setOcrFilledKeys(filled)
-    setTimeout(() => setOcrFilledKeys(new Set()), 2000)
+
+    if (Object.keys(updates).length > 0) {
+      setValues(prev => ({ ...prev, ...updates }))
+      setOcrFilledKeys(filled)
+    }
+
+    const timer = setTimeout(() => setOcrFilledKeys(new Set()), 2000)
 
     // Set line items if detected
     if (ocrResult.items && ocrResult.items.length > 1) {
@@ -51,17 +61,25 @@ export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, 
       setLineItems([])
       setShowItems(false)
     }
-  }, [ocrResult, fields, setValue])
+
+    return () => clearTimeout(timer)
+  }, [ocrResult, fields])
 
   const hasMultipleItems = lineItems.length > 1
 
+  const handleFieldChange = (key: string, val: string) => {
+    setValues(prev => ({ ...prev, [key]: val }))
+  }
+
   // When saving, serialize line items into payload
-  const handleSaveAttempt: SubmitHandler<Record<string, string>> = async (data) => {
-    const missing = fields.filter(f => f.required && !data[f.key]?.trim())
+  const handleSaveAttempt = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const missing = fields.filter(f => f.required && !values[f.key]?.trim())
     if (missing.length > 0) {
       setWarnModal({ open: true, missing: missing.map(f => f.label) })
       return
     }
+    const data = { ...values }
     if (hasMultipleItems) {
       data['_line_items'] = JSON.stringify(lineItems)
     }
@@ -70,7 +88,7 @@ export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, 
 
   const handleSaveAnyway = async () => {
     setWarnModal({ open: false, missing: [] })
-    const data = getValues()
+    const data = { ...values }
     if (hasMultipleItems) {
       data['_line_items'] = JSON.stringify(lineItems)
     }
@@ -89,9 +107,18 @@ export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, 
     setLineItems(prev => prev.filter((_, i) => i !== index))
   }
 
+  if (!fields || fields.length === 0) {
+    return (
+      <div className="py-6 text-center text-sm text-muted">
+        No schema fields defined. Please configure your schema in{' '}
+        <a href="/settings" className="text-accent underline">Settings</a>.
+      </div>
+    )
+  }
+
   return (
     <>
-      <form onSubmit={handleSubmit(handleSaveAttempt)} className="flex flex-col gap-4">
+      <form onSubmit={handleSaveAttempt} className="flex flex-col gap-4">
         {fields.map(field => {
           // Hide per-item fields when we have a multi-item table
           if (hasMultipleItems && showItems && ITEM_LEVEL_KEYS.has(field.key)) {
@@ -99,10 +126,9 @@ export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, 
           }
 
           const isOcrFilled = ocrFilledKeys.has(field.key)
-          const error       = errors[field.key]?.message
 
           return (
-            <div key={field.key} className="flex flex-col gap-0.5">
+            <div key={field.key || field.id} className="flex flex-col gap-0.5">
               <label className="text-sm font-medium text-muted font-body">
                 {field.label}
                 {field.required && <span className="text-danger ml-0.5">*</span>}
@@ -111,19 +137,16 @@ export function DynamicForm({ fields, ocrResult, initialValues, onSave, saving, 
                 type={field.type === 'date' ? 'text' : field.type === 'number' ? 'number' : 'text'}
                 step={field.type === 'number' ? 'any' : undefined}
                 disabled={locked}
-                placeholder={field.type === 'date' ? 'DD/MM/YYYY' : `Enter ${field.label.toLowerCase()}`}
-                {...register(field.key, {
-                  validate: () => true,
-                })}
+                placeholder={field.type === 'date' ? 'DD/MM/YYYY' : `Enter ${(field.label || '').toLowerCase()}`}
+                value={values[field.key] ?? ''}
+                onChange={e => handleFieldChange(field.key, e.target.value)}
                 className={[
                   'w-full rounded border bg-surface px-3 py-2 text-text font-body text-base',
                   'border-border focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30',
                   'disabled:opacity-50 disabled:cursor-not-allowed min-h-[44px] transition-colors duration-80',
                   isOcrFilled ? 'ocr-filled border-l-[3px] border-l-accent' : '',
-                  error ? 'border-danger' : '',
                 ].join(' ')}
               />
-              {error && <p className="text-xs text-danger">{error}</p>}
             </div>
           )
         })}
